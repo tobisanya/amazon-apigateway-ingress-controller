@@ -16,6 +16,18 @@ import (
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 )
 
+func getS3BucketName(ingress *extensionsv1beta1.Ingress) string {
+	return ingress.ObjectMeta.Annotations[IngressAnnotationCFS3BucketName]
+}
+
+func getLoggingLevel(ingress *extensionsv1beta1.Ingress) string {
+	return ingress.ObjectMeta.Annotations[IngressAnnotationLoggingLevel]
+}
+
+func getS3ObjectKey(ingress *extensionsv1beta1.Ingress) string {
+	return ingress.ObjectMeta.Annotations[IngressAnnotationCFS3ObjectKey]
+}
+
 func getRequestTimeout(ingress *extensionsv1beta1.Ingress) int {
 	var requetTimeoutStr string = ingress.ObjectMeta.Annotations[IngressAnnotationRequestTimeout]
 	requetTimeout, err := strconv.Atoi(requetTimeoutStr)
@@ -297,6 +309,13 @@ func shouldUpdate(stack *cloudformation.Stack, instance *extensionsv1beta1.Ingre
 		return true
 	}
 
+	if cfn.StackOutputMap(stack)[cfn.OutputLoggingLevel] != getLoggingLevel(instance) {
+		r.log.Info("LoggingLevel not matching, Should Update",
+			zap.String("Input", getLoggingLevel(instance)),
+			zap.String("Output", cfn.StackOutputMap(stack)[cfn.OutputLoggingLevel]))
+		return true
+	}
+
 	if cfn.StackOutputMap(stack)[cfn.OutputKeyCustomDomainBasePath] != getCustomDomainBasePath(instance) {
 		r.log.Info("Custom Domain Base Path not matching, Should Update",
 			zap.String("Input", getCustomDomainBasePath(instance)),
@@ -311,7 +330,7 @@ func shouldUpdate(stack *cloudformation.Stack, instance *extensionsv1beta1.Ingre
 		return true
 	}
 
-	if cfn.StackOutputMap(stack)[cfn.OutputKeyTLSPolicy] != getTLSPolicy(instance) {
+	if getCustomDomainName(instance) != "" && cfn.StackOutputMap(stack)[cfn.OutputKeyTLSPolicy] != getTLSPolicy(instance) {
 		r.log.Info("TLS policy not matching, Should Update",
 			zap.String("Input", getTLSPolicy(instance)),
 			zap.String("Output", cfn.StackOutputMap(stack)[cfn.OutputKeyTLSPolicy]))

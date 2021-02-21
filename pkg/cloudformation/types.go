@@ -66,6 +66,7 @@ type MethodThrottlingParametersObject struct {
 type APIResource struct {
 	Path              string          `json:"path"`
 	CachingEnabled    bool            `json:"caching_enabled"`
+	CacheTtlInSeconds int             `json:"cache_ttl_secs"`
 	Methods           []Method        `json:"method"`
 	PathParams        []ConstantParam `json:"cons_path_params"`
 	QueryParams       []ConstantParam `json:"cons_query_params"`
@@ -73,6 +74,8 @@ type APIResource struct {
 	ProxyPathParams   []Param         `json:"path_params"`
 	ProxyQueryParams  []Param         `json:"query_params"`
 	ProxyHeaderParams []Param         `json:"header_params"`
+	Type              string          `json:"type"`
+	LambdaArn         string          `json:"lambda_arn"`
 }
 
 type Method struct {
@@ -92,6 +95,8 @@ type AWSAPIDefinition struct {
 	UsagePlans            []UsagePlan        `json:"usage_plans"`
 	Authorizers           []AWSAPIAuthorizer `json:"authorizers"`
 	APIs                  []APIResource      `json:"apis"`
+	BinaryMediaTypes      []string           `json:"binary_media_types"`
+	LoggingLevel          string             `json:"logging_level"`
 }
 
 type AWSAPIAuthorizer struct {
@@ -106,8 +111,9 @@ type AWSAPIAuthorizer struct {
 }
 
 type Param struct {
-	Param    string `json:"param"`
-	Required bool   `json:"required"`
+	Param        string `json:"param"`
+	Required     bool   `json:"required"`
+	MappingParam string `json:"mapping_param"`
 }
 
 type ConstantParam struct {

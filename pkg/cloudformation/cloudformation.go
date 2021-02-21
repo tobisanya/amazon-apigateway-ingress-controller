@@ -3,6 +3,7 @@ package cloudformation
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -30,6 +31,7 @@ const (
 	APIResourceResourceName                 = "Resource"
 	APIResourceName                         = "RestAPI"
 	APIAuthorizerResourceName               = "RestAPIAuthorizer"
+	APIEmptyModelResourceName               = "RestAPIEmptyModel"
 	CustomDomainResourceName                = "CustomDomain"
 	CustomDomainBasePathMappingResourceName = "CustomDomainBasePathMapping"
 	DeploymentResourceName                  = "Deployment"
@@ -70,14 +72,19 @@ const (
 	OutputKeyCacheClusterSize               = "CachingSize"
 	OutputKeyAPIResources                   = "APIResources"
 	OutputKeyAWSAPIConfigs                  = "AWSAPIConfigs"
+	OutputLoggingLevel                      = "LoggingLevel"
 )
 
 func toLogicalName(idx int, parts []string) string {
 	s := strings.Join(parts[:idx+1], "")
-	remove := []string{"{", "}", "+", "-", "*", "_"}
-	for _, char := range remove {
-		s = strings.Replace(s, char, "", -1)
+	reg, err := regexp.Compile("[^a-zA-Z0-9]+")
+	if err != nil {
+		remove := []string{"{", "}", "+", "-", "*", "_"}
+		for _, char := range remove {
+			s = strings.Replace(s, char, "", -1)
+		}
 	}
+	s = reg.ReplaceAllString(s, "")
 	return s
 }
 
@@ -148,93 +155,65 @@ func mapApiGatewayMethodsAndResourcesFromPaths(paths []extensionsv1beta1.HTTPIng
 }
 
 func buildAWSApiGatewayResource(ref, part string, index int) *apigateway.Resource {
-	return &apigateway.Resource{
+	resource := &apigateway.Resource{
 		ParentId:  ref,
 		PathPart:  part,
 		RestApiId: cfn.Ref(fmt.Sprintf("%s%d", APIResourceName, index)),
 	}
+	resource.AWSCloudFormationDependsOn = []string{VPCLinkResourceName}
+	return resource
 }
 
-func buildAWSApiGatewayRestAPI(arns []string, apiEPType string, authorizationType string, minimumCompressionSize int, apiName string) *apigateway.RestApi {
-	if authorizationType == "AWS_IAM" && minimumCompressionSize > 0 {
-		return &apigateway.RestApi{
-			MinimumCompressionSize: minimumCompressionSize,
-			ApiKeySourceType:       "HEADER",
-			EndpointConfiguration: &apigateway.RestApi_EndpointConfiguration{
-				Types: []string{apiEPType},
-			},
-			Name: apiName,
-			Policy: &PolicyDocument{
-				Version: "2012-10-17",
-				Statement: []Statement{
-					{
-						Action:    []string{"execute-api:Invoke"},
-						Effect:    "Allow",
-						Principal: map[string][]string{"AWS": arns},
-						Resource:  []string{"*"},
-					},
-				},
-			},
-		}
-	} else if authorizationType == "AWS_IAM" && minimumCompressionSize == 0 {
-		return &apigateway.RestApi{
-			ApiKeySourceType: "HEADER",
-			EndpointConfiguration: &apigateway.RestApi_EndpointConfiguration{
-				Types: []string{apiEPType},
-			},
-			Name: apiName,
-			Policy: &PolicyDocument{
-				Version: "2012-10-17",
-				Statement: []Statement{
-					{
-						Action:    []string{"execute-api:Invoke"},
-						Effect:    "Allow",
-						Principal: map[string][]string{"AWS": arns},
-						Resource:  []string{"*"},
-					},
-				},
-			},
-		}
-	} else if minimumCompressionSize > 0 {
-		return &apigateway.RestApi{
-			MinimumCompressionSize: minimumCompressionSize,
-			ApiKeySourceType:       "HEADER",
-			EndpointConfiguration: &apigateway.RestApi_EndpointConfiguration{
-				Types: []string{apiEPType},
-			},
-			Name: apiName,
-			Policy: &AllPrinciplesPolicyDocument{
-				Version: "2012-10-17",
-				Statement: []AllPrinciplesStatement{
-					{
-						Action:    []string{"execute-api:Invoke"},
-						Effect:    "Allow",
-						Principal: "*",
-						Resource:  []string{"*"},
-					},
+func buildAWSApiGatewayEmptyModel(index int) *apigateway.Model {
+	model := &apigateway.Model{
+		ContentType: "application/json",
+		Schema:      "{\"$schema\": \"http://json-schema.org/draft-04/schema#\",\"title\" : \"Empty Schema\", \"type\" : \"object\" }",
+		RestApiId:   cfn.Ref(fmt.Sprintf("%s%d", APIResourceName, index)),
+	}
+	return model
+}
+
+func buildAWSApiGatewayRestAPI(arns []string, apiEPType string, authorizationType string, minimumCompressionSize int, apiName string, binaryMediaTypes []string) *apigateway.RestApi {
+	api := &apigateway.RestApi{
+		ApiKeySourceType: "HEADER",
+		EndpointConfiguration: &apigateway.RestApi_EndpointConfiguration{
+			Types: []string{apiEPType},
+		},
+		Name: apiName,
+	}
+	if authorizationType == "AWS_IAM" {
+		api.Policy = &PolicyDocument{
+			Version: "2012-10-17",
+			Statement: []Statement{
+				{
+					Action:    []string{"execute-api:Invoke"},
+					Effect:    "Allow",
+					Principal: map[string][]string{"AWS": arns},
+					Resource:  []string{"*"},
 				},
 			},
 		}
 	} else {
-		return &apigateway.RestApi{
-			ApiKeySourceType: "HEADER",
-			EndpointConfiguration: &apigateway.RestApi_EndpointConfiguration{
-				Types: []string{apiEPType},
-			},
-			Name: apiName,
-			Policy: &AllPrinciplesPolicyDocument{
-				Version: "2012-10-17",
-				Statement: []AllPrinciplesStatement{
-					{
-						Action:    []string{"execute-api:Invoke"},
-						Effect:    "Allow",
-						Principal: "*",
-						Resource:  []string{"*"},
-					},
+		api.Policy = &AllPrinciplesPolicyDocument{
+			Version: "2012-10-17",
+			Statement: []AllPrinciplesStatement{
+				{
+					Action:    []string{"execute-api:Invoke"},
+					Effect:    "Allow",
+					Principal: "*",
+					Resource:  []string{"*"},
 				},
 			},
 		}
 	}
+	if minimumCompressionSize > 0 {
+		api.MinimumCompressionSize = minimumCompressionSize
+	}
+	if binaryMediaTypes != nil {
+		api.BinaryMediaTypes = binaryMediaTypes
+	}
+	api.AWSCloudFormationDependsOn = []string{VPCLinkResourceName}
+	return api
 }
 
 type EmptyAction struct{}
@@ -290,15 +269,22 @@ func buildAWSAPIGWDeploymentMethodSettings(cachingEnabled bool, apiResources []A
 	if cachingEnabled && apiResources != nil && len(apiResources) > 0 {
 		for i, resource := range apiResources {
 			for j, method := range resource.Methods {
-				methodSetting := apigateway.Deployment_MethodSetting{
-					ResourcePath:   buildResourcePath(resource.Path),
-					HttpMethod:     method.Method,
-					CachingEnabled: resource.CachingEnabled,
-				}
-				if i == 0 && j == 0 {
-					methodSettings[0] = methodSetting
-				} else {
-					methodSettings = append(methodSettings, methodSetting)
+				if resource.CachingEnabled {
+					cacheTTLSecs := 300
+					if resource.CacheTtlInSeconds > 0 {
+						cacheTTLSecs = resource.CacheTtlInSeconds
+					}
+					methodSetting := apigateway.Deployment_MethodSetting{
+						ResourcePath:      buildResourcePath(resource.Path),
+						HttpMethod:        method.Method,
+						CachingEnabled:    resource.CachingEnabled,
+						CacheTtlInSeconds: cacheTTLSecs,
+					}
+					if i == 0 && j == 0 {
+						methodSettings[0] = methodSetting
+					} else {
+						methodSettings = append(methodSettings, methodSetting)
+					}
 				}
 			}
 		}
@@ -306,7 +292,7 @@ func buildAWSAPIGWDeploymentMethodSettings(cachingEnabled bool, apiResources []A
 	return methodSettings
 }
 
-func buildAWSApiGatewayDeployment(stageName string, dependsOn []string, cachingEnabled bool, apiResources []APIResource, cacheSize string, index int) *apigateway.Deployment {
+func buildAWSApiGatewayDeployment(stageName string, dependsOn []string, cachingEnabled bool, apiResources []APIResource, cacheSize string, loggingLevel string, index int) *apigateway.Deployment {
 	d := &apigateway.Deployment{
 		RestApiId: cfn.Ref(fmt.Sprintf("%s%d", APIResourceName, index)),
 		StageName: stageName,
@@ -316,6 +302,10 @@ func buildAWSApiGatewayDeployment(stageName string, dependsOn []string, cachingE
 			CacheDataEncrypted:  cachingEnabled,
 			MethodSettings:      buildAWSAPIGWDeploymentMethodSettings(cachingEnabled, apiResources),
 		},
+	}
+
+	if loggingLevel != "" {
+		d.StageDescription.LoggingLevel = loggingLevel
 	}
 
 	// Since we construct a map of in `mapApiGatewayMethodsAndResourcesFromPaths` we can't determine the order
@@ -407,24 +397,36 @@ func buildAWSApiGatewayMethod(resourceLogicalName, path string, timeout int, aut
 			for _, param := range resource.ProxyPathParams {
 				mathodVarName := fmt.Sprintf("method.request.path.%s", param.Param)
 				intVarName := fmt.Sprintf("integration.request.path.%s", param.Param)
-				requestParams[mathodVarName] = true
-				integrationRequestParams[intVarName] = mathodVarName
+				if param.MappingParam != "" {
+					integrationRequestParams[intVarName] = param.MappingParam
+				} else {
+					integrationRequestParams[intVarName] = mathodVarName
+					requestParams[mathodVarName] = true
+				}
 			}
 		}
 		if resource.ProxyQueryParams != nil && len(resource.ProxyQueryParams) > 0 {
 			for _, param := range resource.ProxyQueryParams {
 				mathodVarName := fmt.Sprintf("method.request.query.%s", param.Param)
 				intVarName := fmt.Sprintf("integration.request.query.%s", param.Param)
-				requestParams[mathodVarName] = true
-				integrationRequestParams[intVarName] = mathodVarName
+				if param.MappingParam != "" {
+					integrationRequestParams[intVarName] = param.MappingParam
+				} else {
+					integrationRequestParams[intVarName] = mathodVarName
+					requestParams[mathodVarName] = true
+				}
 			}
 		}
 		if resource.ProxyHeaderParams != nil && len(resource.ProxyHeaderParams) > 0 {
 			for _, param := range resource.ProxyHeaderParams {
 				mathodVarName := fmt.Sprintf("method.request.header.%s", param.Param)
 				intVarName := fmt.Sprintf("integration.request.header.%s", param.Param)
-				requestParams[mathodVarName] = true
-				integrationRequestParams[intVarName] = mathodVarName
+				if param.MappingParam != "" {
+					integrationRequestParams[intVarName] = param.MappingParam
+				} else {
+					integrationRequestParams[intVarName] = mathodVarName
+					requestParams[mathodVarName] = true
+				}
 			}
 		}
 		if resource.PathParams != nil && len(resource.PathParams) > 0 {
@@ -444,7 +446,13 @@ func buildAWSApiGatewayMethod(resourceLogicalName, path string, timeout int, aut
 		}
 	}
 
-	var m *apigateway.Method
+	m := &apigateway.Method{
+		RequestParameters: requestParams,
+		ApiKeyRequired:    apiKeyRequired,
+		HttpMethod:        method,
+		ResourceId:        cfn.Ref(resourceLogicalName),
+		RestApiId:         cfn.Ref(fmt.Sprintf("%s%d", APIResourceName, index)),
+	}
 
 	if authorizer != nil {
 		if authorizer.AuthorizerType == "TOKEN" || authorizer.AuthorizerType == "REQUEST" {
@@ -454,69 +462,66 @@ func buildAWSApiGatewayMethod(resourceLogicalName, path string, timeout int, aut
 			authorizationType = authorizer.AuthorizerType
 		}
 		if scopes == nil {
-			m = &apigateway.Method{
-				RequestParameters: requestParams,
-				AuthorizationType: authorizationType,
-				ApiKeyRequired:    apiKeyRequired,
-				AuthorizerId:      cfn.Ref(fmt.Sprintf("%s%d%d", APIAuthorizerResourceName, index, authorizerIndex)),
-				HttpMethod:        method,
-				ResourceId:        cfn.Ref(resourceLogicalName),
-				RestApiId:         cfn.Ref(fmt.Sprintf("%s%d", APIResourceName, index)),
-				Integration: &apigateway.Method_Integration{
-					ConnectionId:          cfn.Ref(VPCLinkResourceName),
-					ConnectionType:        "VPC_LINK",
-					IntegrationHttpMethod: "ANY",
-					PassthroughBehavior:   "WHEN_NO_MATCH",
-					RequestParameters:     integrationRequestParams,
-					Type:                  "HTTP_PROXY",
-					TimeoutInMillis:       timeout,
-					Uri:                   cfn.Join("", []string{"http://", cfn.GetAtt(LoadBalancerResourceName, "DNSName"), path}),
-				},
-			}
+			m.AuthorizerId = cfn.Ref(fmt.Sprintf("%s%d%d", APIAuthorizerResourceName, index, authorizerIndex))
 		} else {
-			m = &apigateway.Method{
-				RequestParameters:   requestParams,
-				AuthorizationType:   authorizationType,
-				AuthorizationScopes: scopes,
-				ApiKeyRequired:      apiKeyRequired,
-				AuthorizerId:        cfn.Ref(fmt.Sprintf("%s%d%d", APIAuthorizerResourceName, index, authorizerIndex)),
-				HttpMethod:          method,
-				ResourceId:          cfn.Ref(resourceLogicalName),
-				RestApiId:           cfn.Ref(fmt.Sprintf("%s%d", APIResourceName, index)),
-				Integration: &apigateway.Method_Integration{
-					ConnectionId:          cfn.Ref(VPCLinkResourceName),
-					ConnectionType:        "VPC_LINK",
-					IntegrationHttpMethod: "ANY",
-					PassthroughBehavior:   "WHEN_NO_MATCH",
-					RequestParameters:     integrationRequestParams,
-					Type:                  "HTTP_PROXY",
-					TimeoutInMillis:       timeout,
-					Uri:                   cfn.Join("", []string{"http://", cfn.GetAtt(LoadBalancerResourceName, "DNSName"), path}),
-				},
-			}
-		}
-	} else {
-		m = &apigateway.Method{
-			RequestParameters: requestParams,
-			AuthorizationType: authorizationType,
-			ApiKeyRequired:    apiKeyRequired,
-			HttpMethod:        method,
-			ResourceId:        cfn.Ref(resourceLogicalName),
-			RestApiId:         cfn.Ref(fmt.Sprintf("%s%d", APIResourceName, index)),
-			Integration: &apigateway.Method_Integration{
-				ConnectionId:          cfn.Ref(VPCLinkResourceName),
-				ConnectionType:        "VPC_LINK",
-				IntegrationHttpMethod: "ANY",
-				PassthroughBehavior:   "WHEN_NO_MATCH",
-				RequestParameters:     integrationRequestParams,
-				Type:                  "HTTP_PROXY",
-				TimeoutInMillis:       timeout,
-				Uri:                   cfn.Join("", []string{"http://", cfn.GetAtt(LoadBalancerResourceName, "DNSName"), path}),
-			},
+			m.AuthorizationScopes = scopes
+			m.AuthorizerId = cfn.Ref(fmt.Sprintf("%s%d%d", APIAuthorizerResourceName, index, authorizerIndex))
 		}
 	}
 
-	m.AWSCloudFormationDependsOn = []string{LoadBalancerResourceName}
+	m.AuthorizationType = authorizationType
+	successResponseTemplates := make(map[string]string)
+	successResponseTemplates["application/json"] = ""
+	integrationResponses := []apigateway.Method_IntegrationResponse{
+		{
+			ResponseTemplates: successResponseTemplates,
+			StatusCode:        "200",
+		},
+	}
+	successMethodResponseTemplates := make(map[string]string)
+	successMethodResponseTemplates["application/json"] = cfn.Ref(fmt.Sprintf("%s%d", APIEmptyModelResourceName, index))
+	methodResponses := []apigateway.Method_MethodResponse{
+		{
+			ResponseModels: successMethodResponseTemplates,
+			StatusCode:     "200",
+		},
+	}
+
+	if resource.Type == "Lambda" {
+		m.Integration = &apigateway.Method_Integration{
+			ConnectionType:        "INTERNET",
+			IntegrationResponses:  integrationResponses,
+			IntegrationHttpMethod: method,
+			PassthroughBehavior:   "WHEN_NO_MATCH",
+			RequestParameters:     integrationRequestParams,
+			Type:                  "AWS",
+			TimeoutInMillis:       timeout,
+			Uri:                   cfn.Join("", []string{"arn:aws:apigateway:", cfn.Ref(AWSRegion), fmt.Sprintf(":lambda:path/2015-03-31/functions/%s/invocations", resource.LambdaArn)}),
+		}
+		m.MethodResponses = methodResponses
+	} else if resource.Type == "Mock" {
+		requestTemplates := make(map[string]string)
+		requestTemplates["application/json"] = "{statusCode: 200}"
+		m.Integration = &apigateway.Method_Integration{
+			Type:                 "MOCK",
+			RequestTemplates:     requestTemplates,
+			IntegrationResponses: integrationResponses,
+		}
+		m.MethodResponses = methodResponses
+	} else {
+		m.Integration = &apigateway.Method_Integration{
+			ConnectionId:          cfn.Ref(VPCLinkResourceName),
+			ConnectionType:        "VPC_LINK",
+			IntegrationHttpMethod: method,
+			PassthroughBehavior:   "WHEN_NO_MATCH",
+			RequestParameters:     integrationRequestParams,
+			Type:                  "HTTP_PROXY",
+			TimeoutInMillis:       timeout,
+			Uri:                   cfn.Join("", []string{"http://", cfn.GetAtt(LoadBalancerResourceName, "DNSName"), path}),
+		}
+	}
+
+	m.AWSCloudFormationDependsOn = []string{LoadBalancerResourceName, VPCLinkResourceName}
 	return m
 }
 
@@ -552,7 +557,7 @@ func buildCustomDomainBasePathMapping(domainName string, stageName string, baseP
 		}
 	}
 
-	r.AWSCloudFormationDependsOn = []string{fmt.Sprintf("%s%d", DeploymentResourceName, index)}
+	r.AWSCloudFormationDependsOn = []string{fmt.Sprintf("%s%d", DeploymentResourceName, index), CustomDomainResourceName}
 	return r
 }
 
@@ -608,7 +613,7 @@ func buildAPIKey(usagePlan UsagePlan, index int) []*apigateway.ApiKey {
 	return arr
 }
 
-func buildUsagePlan(usagePlan UsagePlan, stage string, index int) *apigateway.UsagePlan {
+func buildUsagePlan(usagePlan UsagePlan, stage string, index int, usagePlanMethodSettings []apigateway.UsagePlan_ApiStage) *apigateway.UsagePlan {
 	r := &apigateway.UsagePlan{
 		UsagePlanName: usagePlan.PlanName,
 		Description:   usagePlan.Description,
@@ -623,9 +628,44 @@ func buildUsagePlan(usagePlan UsagePlan, stage string, index int) *apigateway.Us
 		},
 	}
 
-	r.ApiStages = buildMethodThrottling(usagePlan.MethodThrottlingParameters, stage, index)
+	if usagePlanMethodSettings != nil {
+		r.ApiStages = usagePlanMethodSettings
+	} else {
+		r.ApiStages = buildMethodThrottling(usagePlan.MethodThrottlingParameters, stage, index)
+	}
 
 	r.AWSCloudFormationDependsOn = []string{fmt.Sprintf("%s%d", DeploymentResourceName, index)}
+
+	return r
+}
+
+func buildGlobalUsagePlan(usagePlan UsagePlan, stage string, index int, usagePlanMethodSettings []apigateway.UsagePlan_ApiStage, deploymentCount int) *apigateway.UsagePlan {
+	r := &apigateway.UsagePlan{
+		UsagePlanName: usagePlan.PlanName,
+		Description:   usagePlan.Description,
+		Quota: &apigateway.UsagePlan_QuotaSettings{
+			Limit:  usagePlan.QuotaLimit,
+			Offset: usagePlan.QuotaOffset,
+			Period: usagePlan.QuotaPeriod,
+		},
+		Throttle: &apigateway.UsagePlan_ThrottleSettings{
+			BurstLimit: usagePlan.ThrottleBurstLimit,
+			RateLimit:  usagePlan.ThrottleRateLimit,
+		},
+	}
+
+	if usagePlanMethodSettings != nil {
+		r.ApiStages = usagePlanMethodSettings
+	} else {
+		r.ApiStages = buildMethodThrottling(usagePlan.MethodThrottlingParameters, stage, index)
+	}
+
+	var dependsOn []string = make([]string, deploymentCount)
+	for i := 0; i < deploymentCount; i++ {
+
+		dependsOn[i] = fmt.Sprintf("%s%d", DeploymentResourceName, i)
+	}
+	r.AWSCloudFormationDependsOn = dependsOn
 
 	return r
 }
@@ -751,6 +791,7 @@ type TemplateConfig struct {
 	MinimumCompressionSize int
 	CachingEnabled         bool
 	CachingSize            string
+	LoggingLevel           string
 	APIResources           []APIResource
 	AWSAPIDefinitions      []AWSAPIDefinition
 }
@@ -817,6 +858,10 @@ func BuildAPIGatewayTemplateFromIngressRule(cfg *TemplateConfig) *cfn.Template {
 		template.Resources[WAFACLResourceName] = webACL
 	}
 
+	usagePlanStages := make(map[int][]apigateway.UsagePlan_ApiStage)
+	useGlobalUsagePlans := false
+	globalUsagePlanIndex := 0
+
 	for i := 0; i < apiSize; i++ {
 
 		methodLogicalNames := []string{}
@@ -842,13 +887,21 @@ func BuildAPIGatewayTemplateFromIngressRule(cfg *TemplateConfig) *cfn.Template {
 		}
 
 		if cfg.AWSAPIDefinitions != nil && len(cfg.AWSAPIDefinitions) > 0 && !cfg.AWSAPIDefinitions[i].AuthenticationEnabled {
-			restAPI := buildAWSApiGatewayRestAPI(cfg.Arns, cfg.APIEndpointType, "NONE", cfg.MinimumCompressionSize, cfg.AWSAPIDefinitions[i].Name)
+			var binaryMediaTypes []string
+			if cfg.AWSAPIDefinitions[i].BinaryMediaTypes != nil && len(cfg.AWSAPIDefinitions[i].BinaryMediaTypes) > 0 {
+				binaryMediaTypes = cfg.AWSAPIDefinitions[i].BinaryMediaTypes
+			}
+			restAPI := buildAWSApiGatewayRestAPI(cfg.Arns, cfg.APIEndpointType, "NONE", cfg.MinimumCompressionSize, cfg.AWSAPIDefinitions[i].Name, binaryMediaTypes)
 			template.Resources[fmt.Sprintf("%s%d", APIResourceName, i)] = restAPI
 		} else if cfg.AWSAPIDefinitions != nil && len(cfg.AWSAPIDefinitions) > 0 {
-			restAPI := buildAWSApiGatewayRestAPI(cfg.Arns, cfg.APIEndpointType, authorizationType, cfg.MinimumCompressionSize, cfg.AWSAPIDefinitions[i].Name)
+			var binaryMediaTypes []string
+			if cfg.AWSAPIDefinitions[i].BinaryMediaTypes != nil && len(cfg.AWSAPIDefinitions[i].BinaryMediaTypes) > 0 {
+				binaryMediaTypes = cfg.AWSAPIDefinitions[i].BinaryMediaTypes
+			}
+			restAPI := buildAWSApiGatewayRestAPI(cfg.Arns, cfg.APIEndpointType, authorizationType, cfg.MinimumCompressionSize, cfg.AWSAPIDefinitions[i].Name, binaryMediaTypes)
 			template.Resources[fmt.Sprintf("%s%d", APIResourceName, i)] = restAPI
 		} else {
-			restAPI := buildAWSApiGatewayRestAPI(cfg.Arns, cfg.APIEndpointType, authorizationType, cfg.MinimumCompressionSize, cfn.Ref(AWSStackName))
+			restAPI := buildAWSApiGatewayRestAPI(cfg.Arns, cfg.APIEndpointType, authorizationType, cfg.MinimumCompressionSize, cfn.Ref(AWSStackName), []string{"AWS::NoValue"})
 			template.Resources[fmt.Sprintf("%s%d", APIResourceName, i)] = restAPI
 		}
 
@@ -859,8 +912,20 @@ func BuildAPIGatewayTemplateFromIngressRule(cfg *TemplateConfig) *cfn.Template {
 			}
 		}
 
-		deployment := buildAWSApiGatewayDeployment(cfg.StageName, methodLogicalNames, cfg.CachingEnabled, cfg.APIResources, cfg.CachingSize, i)
-		template.Resources[fmt.Sprintf("%s%d", DeploymentResourceName, i)] = deployment
+		var loggingLevel string
+		if cfg.AWSAPIDefinitions != nil && len(cfg.AWSAPIDefinitions) > 0 {
+			loggingLevel = cfg.AWSAPIDefinitions[i].LoggingLevel
+		} else {
+			loggingLevel = cfg.LoggingLevel
+		}
+
+		if cfg.AWSAPIDefinitions != nil && len(cfg.AWSAPIDefinitions) > 0 {
+			deployment := buildAWSApiGatewayDeployment(cfg.StageName, methodLogicalNames, cfg.CachingEnabled, cfg.AWSAPIDefinitions[i].APIs, cfg.CachingSize, loggingLevel, i)
+			template.Resources[fmt.Sprintf("%s%d", DeploymentResourceName, i)] = deployment
+		} else {
+			deployment := buildAWSApiGatewayDeployment(cfg.StageName, methodLogicalNames, cfg.CachingEnabled, cfg.APIResources, cfg.CachingSize, loggingLevel, i)
+			template.Resources[fmt.Sprintf("%s%d", DeploymentResourceName, i)] = deployment
+		}
 
 		if cfg.CustomDomainName != "" && cfg.CertificateArn != "" {
 			if cfg.AWSAPIDefinitions != nil && len(cfg.AWSAPIDefinitions) > 0 {
@@ -880,31 +945,52 @@ func BuildAPIGatewayTemplateFromIngressRule(cfg *TemplateConfig) *cfn.Template {
 		}
 
 		if cfg.AWSAPIDefinitions != nil && len(cfg.AWSAPIDefinitions) > 0 && cfg.AWSAPIDefinitions[i].APIKeyEnabled && cfg.AWSAPIDefinitions[i].UsagePlans != nil && len(cfg.AWSAPIDefinitions[i].UsagePlans) > 0 {
+			globalUsagePlanIndex++
 			for j, usagePlan := range cfg.AWSAPIDefinitions[i].UsagePlans {
 				keyArr := buildAPIKey(usagePlan, i)
 				for k, key := range keyArr {
 					template.Resources[fmt.Sprintf("%s%d%d%d", APIKeyResourceName, j, k, i)] = key
 				}
-				template.Resources[fmt.Sprintf("%s%d%d", UsagePlanResourceName, j, i)] = buildUsagePlan(usagePlan, cfg.StageName, i)
+				template.Resources[fmt.Sprintf("%s%d%d", UsagePlanResourceName, j, i)] = buildUsagePlan(usagePlan, cfg.StageName, i, nil)
 				mapArr := buildUsagePlanAPIKeyMapping(usagePlan, j, i)
 				for k, key := range mapArr {
 					template.Resources[fmt.Sprintf("%s%d%d%d", APIKeyUsagePlanResourceName, j, k, i)] = key
 				}
 			}
 		} else if ((cfg.AWSAPIDefinitions != nil && len(cfg.AWSAPIDefinitions) > 0 && cfg.AWSAPIDefinitions[i].APIKeyEnabled) || (cfg.AWSAPIDefinitions == nil && len(cfg.AWSAPIDefinitions) == 0)) && cfg.UsagePlans != nil && len(cfg.UsagePlans) > 0 {
+			useGlobalUsagePlans = true
 			for j, usagePlan := range cfg.UsagePlans {
-				keyArr := buildAPIKey(usagePlan, i)
-				for k, key := range keyArr {
-					template.Resources[fmt.Sprintf("%s%d%d%d", APIKeyResourceName, j, k, i)] = key
-				}
-				template.Resources[fmt.Sprintf("%s%d%d", UsagePlanResourceName, j, i)] = buildUsagePlan(usagePlan, cfg.StageName, i)
-				mapArr := buildUsagePlanAPIKeyMapping(usagePlan, j, i)
-				for k, key := range mapArr {
-					template.Resources[fmt.Sprintf("%s%d%d%d", APIKeyUsagePlanResourceName, j, k, i)] = key
+				usagePlanCurrentStage := buildMethodThrottling(usagePlan.MethodThrottlingParameters, cfg.StageName, i)
+				if usagePlanStages == nil {
+					usagePlanStages[j] = usagePlanCurrentStage
+				} else {
+					usagePlanStages[j] = append(usagePlanStages[j], usagePlanCurrentStage...)
 				}
 			}
 		}
 
+		template.Resources[fmt.Sprintf("%s%d", APIEmptyModelResourceName, i)] = buildAWSApiGatewayEmptyModel(i)
+
+	}
+
+	var deploymentCount int
+	if cfg.AWSAPIDefinitions != nil && len(cfg.AWSAPIDefinitions) > 0 {
+		deploymentCount = len(cfg.AWSAPIDefinitions)
+	} else {
+		deploymentCount = 1
+	}
+	if useGlobalUsagePlans {
+		for j, usagePlan := range cfg.UsagePlans {
+			keyArr := buildAPIKey(usagePlan, globalUsagePlanIndex)
+			for k, key := range keyArr {
+				template.Resources[fmt.Sprintf("%s%d%d%d", APIKeyResourceName, j, k, globalUsagePlanIndex)] = key
+			}
+			template.Resources[fmt.Sprintf("%s%d%d", UsagePlanResourceName, j, globalUsagePlanIndex)] = buildGlobalUsagePlan(usagePlan, cfg.StageName, globalUsagePlanIndex, usagePlanStages[j], deploymentCount)
+			mapArr := buildUsagePlanAPIKeyMapping(usagePlan, j, globalUsagePlanIndex)
+			for k, key := range mapArr {
+				template.Resources[fmt.Sprintf("%s%d%d%d", APIKeyUsagePlanResourceName, j, k, globalUsagePlanIndex)] = key
+			}
+		}
 	}
 
 	loadBalancer := buildAWSElasticLoadBalancingV2LoadBalancer(cfg.Network.SubnetIDs)
@@ -986,6 +1072,10 @@ func BuildAPIGatewayTemplateFromIngressRule(cfg *TemplateConfig) *cfn.Template {
 	if cfg.APIResources != nil && len(cfg.APIResources) > 0 {
 		val, _ := json.Marshal(cfg.APIResources)
 		template.Outputs[OutputKeyAPIResources] = Output{Value: string(val)}
+	}
+
+	if cfg.LoggingLevel != "" {
+		template.Outputs[OutputLoggingLevel] = Output{Value: cfg.LoggingLevel}
 	}
 
 	return template
